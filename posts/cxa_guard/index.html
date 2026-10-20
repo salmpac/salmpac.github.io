@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__cxa_guard</title>
+<meta name="description" content="О статических локальных переменных и thread safety под капотом.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* ── base palette ── */
+  :root {
+    --bg: #f5f0e8;
+    --text: #222;
+    --muted: #6b6459;
+    --rule: #d9d1c2;
+    --accent: #8a3a1e;
+    --figbg: #ece5d7;
+    --code-bg: #ede8de;
+    --code-inline-bg: #e4ddd0;
+
+    /* syntax highlighting — light */
+    --hl-kw:      #8a3a1e;   /* keywords */
+    --hl-str:     #3a6b28;   /* strings */
+    --hl-cmt:     #948c7e;   /* comments */
+    --hl-num:     #5a4a8a;   /* numbers */
+    --hl-fn:      #1a3c6e;   /* function names */
+    --hl-type:    #6b2b5a;   /* types / class names */
+    --hl-meta:    #7a5500;   /* preprocessor */
+    --hl-sym:     #4a6200;   /* asm labels */
+    --hl-reg:     #1a5050;   /* asm registers */
+  }
+  html[data-theme="dark"] {
+    --bg: #1a1a1a;
+    --text: #e0d8cc;
+    --muted: #8a8378;
+    --rule: #33302b;
+    --accent: #d68a6a;
+    --figbg: #232220;
+    --code-bg: #111009;
+    --code-inline-bg: #1e1c17;
+
+    /* syntax highlighting — dark */
+    --hl-kw:      #d68a6a;
+    --hl-str:     #98c87a;
+    --hl-cmt:     #6e6558;
+    --hl-num:     #c0a8e8;
+    --hl-fn:      #7ab8d8;
+    --hl-type:    #d88ac8;
+    --hl-meta:    #d4b86a;
+    --hl-sym:     #b8c86a;
+    --hl-reg:     #70bcd4;
+  }
+  @media (prefers-color-scheme: dark) {
+    html:not([data-theme]) {
+      --bg: #1a1a1a; --text: #e0d8cc; --muted: #8a8378;
+      --rule: #33302b; --accent: #d68a6a; --figbg: #232220;
+      --code-bg: #111009; --code-inline-bg: #1e1c17;
+      --hl-kw: #d68a6a; --hl-str: #98c87a; --hl-cmt: #6e6558;
+      --hl-num: #c0a8e8; --hl-fn: #7ab8d8; --hl-type: #d88ac8;
+      --hl-meta: #d4b86a; --hl-sym: #b8c86a; --hl-reg: #70bcd4;
+    }
+  }
+
+  /* ── highlight.js token styles ── */
+  .hljs-keyword,
+  .hljs-selector-tag          { color: var(--hl-kw); font-weight: 500; }
+  .hljs-string,
+  .hljs-attr                  { color: var(--hl-str); }
+  .hljs-comment,
+  .hljs-quote                 { color: var(--hl-cmt); font-style: italic; }
+  .hljs-number,
+  .hljs-literal               { color: var(--hl-num); }
+  .hljs-title,
+  .hljs-title\.function_,
+  .hljs-title\.function_\.invoke__ { color: var(--hl-fn); }
+  .hljs-title\.class_         { color: var(--hl-type); }
+  .hljs-type,
+  .hljs-built_in              { color: var(--hl-type); }
+  .hljs-meta,
+  .hljs-meta .hljs-keyword    { color: var(--hl-meta); }
+  /* asm */
+  .hljs-symbol                { color: var(--hl-sym); }
+  .hljs-variable,
+  .hljs-params                { color: var(--hl-reg); }
+  .hljs-operator,
+  .hljs-punctuation           { color: var(--hl-muted, var(--muted)); }
+
+  /* ── layout ── */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body {
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    font-size: 18px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 64px 24px 120px;
+  }
+
+  h1 {
+    font-family: "Fraunces", Georgia, "Times New Roman", serif;
+    font-weight: 600;
+    font-size: 40px;
+    margin: 0 0 40px;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    color: var(--text);
+  }
+
+  p { margin: 0 0 18px; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid currentColor; }
+  a:hover { opacity: 0.75; }
+
+  /* ── code ── */
+  pre {
+    background: var(--code-bg);
+    border-radius: 6px;
+    padding: 18px 22px;
+    overflow-x: auto;
+    font-size: 13.5px;
+    line-height: 1.55;
+    margin: 0 0 22px;
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code", monospace;
+  }
+  pre code {
+    font-family: inherit;
+    background: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  code {
+    font-family: "JetBrains Mono", "Fira Code", ui-monospace, "Cascadia Code", monospace;
+    font-size: 0.875em;
+    background: var(--code-inline-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+
+  .question {
+    font-style: italic;
+    color: var(--muted);
+    margin: 0 0 18px;
+  }
+
+  figure { margin: 32px 0; padding: 0; }
+  figure img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 4px;
+    background: var(--figbg);
+  }
+
+  .home-link {
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    color: var(--muted);
+    font-size: 13px;
+    text-decoration: none;
+    border-bottom: none;
+    transition: color 0.15s ease;
+  }
+  .home-link:hover { color: var(--accent); opacity: 1; }
+
+  .theme-toggle {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .theme-toggle:hover { color: var(--accent); border-color: var(--accent); }
+
+  @media (max-width: 520px) {
+    body { font-size: 17px; }
+    main { padding: 48px 20px 96px; }
+    h1 { font-size: 32px; }
+    pre { font-size: 12.5px; padding: 14px 16px; }
+  }
+</style>
+</head>
+<body>
+<a class="home-link" href="/">← salmpac.ru</a>
+<button class="theme-toggle" id="themeToggle" aria-label="Переключить тему">☾ тёмная</button>
+
+<main>
+  <h1>__cxa_guard</h1>
+
+  <p>В C++ есть такая креветка: статические переменные в функциях. Видя в первый раз, можно подумать, что они инициализируются как обычные глобальные переменные до <code>main</code>.</p>
+
+  <pre><code class="language-cpp">#include &lt;iostream&gt;
+#include &lt;string&gt;
+
+struct Talkative {
+    Talkative() {
+        std::cout &lt;&lt; "hello\n";
+    }
+
+    std::string GiveHello() {
+        return "hello2";
+    }
+};
+
+Talkative global_talkative;
+
+std::string GiveHello() {
+    static Talkative static_talkative;
+    return static_talkative.GiveHello();
+}
+
+int main() {
+    std::cout &lt;&lt; "main start\n";
+    std::cout &lt;&lt; GiveHello() &lt;&lt; '\n';
+}</code></pre>
+
+  <p class="question">что выведет программа?</p>
+
+  <pre><code>hello
+main start
+hello
+hello2</code></pre>
+
+  <p>Почему? Потому что статические переменные инициализируются при первом вызове, а глобальные переменные инициализируются до вызова <code>main</code>.</p>
+
+  <figure>
+    <img src="spasibo%20horosho.jpg" alt="Спасибо хорошо">
+  </figure>
+
+  <p>Какие выводы можно из этого сделать? Например, что для рантайма программы где-то должна лежать информация о том, была ли наша переменная инициализирована. Я довольно много интересуюсь темой многопоточности и следующий вопрос, который у меня возникает: а как обеспечивается thread safety при вызовах из нескольких потоков? Компилятору же нужно как-то обеспечить отсутствие гонок. Посмотрим на пример:</p>
+
+  <pre><code class="language-cpp">#include &lt;chrono&gt;
+#include &lt;iostream&gt;
+#include &lt;thread&gt;
+
+using ms = std::chrono::milliseconds;
+using clk = std::chrono::steady_clock;
+
+static auto t0 = clk::now();
+auto elapsed() { return std::chrono::duration_cast&lt;ms&gt;(clk::now() - t0).count(); }
+
+struct Slow {
+    Slow() {
+        std::cout &lt;&lt; "[t=" &lt;&lt; elapsed() &lt;&lt; "ms] конструктор начался\n";
+        std::this_thread::sleep_for(ms(2000));
+        std::cout &lt;&lt; "[t=" &lt;&lt; elapsed() &lt;&lt; "ms] конструктор закончился\n";
+    }
+};
+
+Slow&amp; get() { static Slow s; return s; }
+
+int main() {
+    std::thread t1([] {
+        std::cout &lt;&lt; "[t=" &lt;&lt; elapsed() &lt;&lt; "ms] поток 1: иду в get()\n";
+        get();
+        std::cout &lt;&lt; "[t=" &lt;&lt; elapsed() &lt;&lt; "ms] поток 1: вышел из get()\n";
+    });
+
+    std::this_thread::sleep_for(ms(100));
+
+    std::thread t2([] {
+        std::cout &lt;&lt; "[t=" &lt;&lt; elapsed() &lt;&lt; "ms] поток 2: иду в get()\n";
+        get();
+        std::cout &lt;&lt; "[t=" &lt;&lt; elapsed() &lt;&lt; "ms] поток 2: вышел из get()\n";
+    });
+
+    t1.join();
+    t2.join();
+}</code></pre>
+
+  <pre><code>[t=0ms] поток 1: иду в get()
+[t=0ms] конструктор начался
+[t=105ms] поток 2: иду в get()
+[t=2005ms] конструктор закончился
+[t=2005ms] поток 1: вышел из get()
+[t=2005ms] поток 2: вышел из get()</code></pre>
+
+  <p>Тут видно, как второй поток ждал выполнение конструктора <code>Slow</code>. Это интересно, то есть получается, потоки синхронизировались. А как? Посмотрим в godbolt на ассемблерный код примера с <code>struct Talkative</code>.</p>
+
+  <pre><code class="language-x86asm">GiveHello[abi:cxx11]():
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, 48
+        mov     qword ptr [rbp - 40], rdi
+        mov     rax, rdi
+        mov     qword ptr [rbp - 32], rax
+        mov     qword ptr [rbp - 8], rdi
+        mov     al, byte ptr [rip + guard variable for GiveHello[abi:cxx11]()::static_talkative]
+        cmp     al, 0
+        jne     .LBB2_4
+        lea     rdi, [rip + guard variable for GiveHello[abi:cxx11]()::static_talkative]
+        call    __cxa_guard_acquire@PLT
+        cmp     eax, 0
+        je      .LBB2_4
+        lea     rdi, [rip + GiveHello[abi:cxx11]()::static_talkative]
+        call    Talkative::Talkative() [base object constructor]
+        jmp     .LBB2_3
+.LBB2_3:
+        lea     rdi, [rip + guard variable for GiveHello[abi:cxx11]()::static_talkative]
+        call    __cxa_guard_release@PLT
+.LBB2_4:
+        mov     rdi, qword ptr [rbp - 40]
+        lea     rsi, [rip + GiveHello[abi:cxx11]()::static_talkative]
+        call    Talkative::GiveHello[abi:cxx11]()
+        mov     rax, qword ptr [rbp - 32]
+        add     rsp, 48
+        pop     rbp
+        ret
+        mov     rcx, rax
+        mov     eax, edx
+        mov     qword ptr [rbp - 16], rcx
+        mov     dword ptr [rbp - 20], eax
+        lea     rdi, [rip + guard variable for GiveHello[abi:cxx11]()::static_talkative]
+        call    __cxa_guard_abort@PLT
+        mov     rdi, qword ptr [rbp - 16]
+        call    _Unwind_Resume@PLT</code></pre>
+
+  <p>Спокойно. Не боимся. Здесь всё не очень сложно.</p>
+
+  <pre><code class="language-x86asm">        mov     al, byte ptr [rip + guard variable for GiveHello[abi:cxx11]()::static_talkative]
+        cmp     al, 0
+        jne     .LBB2_4</code></pre>
+
+  <p>Здесь мы читаем некую guard variable и затем проверяем, равна ли она 0. Семантика такая: если равно 0 — переменная не инициализирована, если больше 0 — инициализирована. В llvm для инициализированной переменной там будет значение <code>COMPLETE_BIT = (1 &lt;&lt; 0)</code>.</p>
+
+  <p>Предположим, что у нас уже всё хорошо и переменная инициализирована. Тогда мы прыгаем в метку <code>LBB2_4</code>. В хорошем случае там исполнится такой код:</p>
+
+  <pre><code class="language-x86asm">        mov     rdi, qword ptr [rbp - 40]
+        lea     rsi, [rip + GiveHello[abi:cxx11]()::static_talkative]
+        call    Talkative::GiveHello[abi:cxx11]()
+        mov     rax, qword ptr [rbp - 32]
+        add     rsp, 48
+        pop     rbp
+        ret</code></pre>
+
+  <p>С ним всё хорошо и понятно. Теперь предположим, что переменная ещё не была инициализирована. Тогда дальше исполнится код:</p>
+
+  <pre><code class="language-x86asm">        lea     rdi, [rip + guard variable for GiveHello[abi:cxx11]()::static_talkative]
+        call    __cxa_guard_acquire@PLT
+        cmp     eax, 0
+        je      .LBB2_4</code></pre>
+
+  <p>Что здесь происходит? Мы кладём в <code>rdi</code> адрес guard variable и вызываем некую функцию <code>__cxa_guard_acquire</code>. Тут надо сказать, что такое guard variable. Структурно это 8 байт с данными с таким layout:</p>
+
+  <pre><code>Guard variable на Itanium/x86-64:
+┌─────────────┬─────────────┬─────────────┬────────────────────┐
+│   байт 0    │   байт 1    │  байты 2-3  │    байты 4-7       │
+│  guard byte │  init byte  │   unused    │    thread id       │
+└─────────────┴─────────────┴─────────────┴────────────────────┘</code></pre>
+
+  <p><code>guard byte</code> по смыслу это просто флаг инициализировано/не инициализировано. Также появляется некий <code>init byte</code>. Ключевой момент, что <code>init byte</code> несёт роль байта для блокировок потоков (на нём висят syscall futex).</p>
+
+  <p>Вот код этой и нескольких других функций (можно найти <a href="https://github.com/llvm/llvm-project/blob/0bf3638ddfe6e8bb3b79ebe8c2a918384a5df612/libcxxabi/src/cxa_guard.cpp#L37">вот здесь</a>):</p>
+
+  <pre><code class="language-cpp">_LIBCXXABI_FUNC_VIS int __cxa_guard_acquire(guard_type* raw_guard_object) {
+  SelectedImplementation imp(raw_guard_object);
+  return static_cast&lt;int&gt;(imp.cxa_guard_acquire());
+}
+
+_LIBCXXABI_FUNC_VIS void __cxa_guard_release(guard_type *raw_guard_object) {
+  SelectedImplementation imp(raw_guard_object);
+  imp.cxa_guard_release();
+}
+
+_LIBCXXABI_FUNC_VIS void __cxa_guard_abort(guard_type *raw_guard_object) {
+  SelectedImplementation imp(raw_guard_object);
+  imp.cxa_guard_abort();
+}</code></pre>
+
+  <p>Поверьте мне, что <code>SelectedImplementation</code> на обычных линуксовых машинах развернётся в:</p>
+
+  <pre><code class="language-cpp">GuardObject&lt;
+    InitByteFutex&lt;
+        PlatformFutexWait,   // syscall(SYS_futex, WAIT)
+        PlatformFutexWake,   // syscall(SYS_futex, WAKE)
+        PlatformThreadID     // syscall(SYS_gettid)
+    &gt;
+&gt;</code></pre>
+
+  <p>Что это за структура? Целиком можно посмотреть <a href="https://github.com/llvm/llvm-project/blob/0bf3638ddfe6e8bb3b79ebe8c2a918384a5df612/libcxxabi/src/cxa_guard_impl.h#L564">здесь</a>. Внутри она хранит два поля:</p>
+
+  <pre><code class="language-cpp">GuardByte guard_byte;
+InitByteT init_byte;</code></pre>
+
+  <p>И инициализирует их вот так:</p>
+
+  <pre><code class="language-cpp">explicit GuardObject(uint64_t* raw_guard_object)
+    : guard_byte(reinterpret_cast&lt;uint8_t*&gt;(raw_guard_object)),
+      init_byte(reinterpret_cast&lt;uint8_t*&gt;(raw_guard_object) + 1,
+                reinterpret_cast&lt;uint32_t*&gt;(raw_guard_object) + 1) {
+}</code></pre>
+
+  <p>То есть наше guard variable раскладывается по схеме, которая была выше. Внутри <code>InitByteT</code> работает очень похоже на устройство mutex в связке с futex (можно почитать и разобраться). Интересно также было бы разобраться, как они тестируют этот код (за рамками этого поста). Дальше в ассемблерном коде идёт вызов конструктора, и в happy path мы проставим guard byte complete значением и отпустим лочку.</p>
+
+  <p>Остался один непокрытый момент. Задам наводящий вопрос: а что за код идёт после <code>ret</code> в <code>LBB2_4</code>? Рассмотрим такой пример:</p>
+
+  <pre><code class="language-cpp">#include &lt;iostream&gt;
+#include &lt;stdexcept&gt;
+
+int attempt = 0;
+
+struct Flaky {
+    Flaky() {
+        ++attempt;
+        std::cout &lt;&lt; "constructor attempt #" &lt;&lt; attempt &lt;&lt; "\n";
+        if (attempt &lt; 3) {
+            throw std::runtime_error("not ready yet");
+        }
+        std::cout &lt;&lt; "success!\n";
+    }
+};
+
+Flaky&amp; get() {
+    static Flaky f;
+    return f;
+}
+
+int main() {
+    for (int i = 0; i &lt; 4; ++i) {
+        try {
+            get();
+            std::cout &lt;&lt; "got instance\n";
+        } catch (const std::exception&amp; e) {
+            std::cout &lt;&lt; "caught: " &lt;&lt; e.what() &lt;&lt; "\n";
+        }
+    }
+}</code></pre>
+
+  <p>Здесь на вид происходит плохая вещь: исключения в конструкторе.</p>
+
+  <p class="question">что выведет программа?</p>
+
+  <pre><code>constructor attempt #1
+caught: not ready yet
+constructor attempt #2
+caught: not ready yet
+constructor attempt #3
+success!
+got instance
+got instance</code></pre>
+
+  <p>По сути здесь три раза вызывается конструктор, первые два раза он выдаёт исключение и затем нормально завершается. Но тогда нам нужно абортнуть наше изменение и разбудить другие потоки, которые висят на <code>init_byte</code>. Этот код вызывается при развороте стека и служит подушкой безопасности для плохих сценариев. В нём как раз вызывается <code>__cxa_guard_abort@PLT</code> для аборта.</p>
+
+  <p>Может ещё возникнуть такой вопрос: а зачем нам два байта, если можно хранить весь state в одном guard байте? Ответ достаточно простой: так быстрее. На горячем пути быстрее просто прочитать guard байт без заборов, которые могут появиться при операциях с атомиками.</p>
+
+  <p>Причём забавно, что никакой гарантии на положение guard variable нет. Компилятор сам решает, где положить эту переменную относительно охраняемой переменной в bss.</p>
+
+  <p>Глубокой мысли в конце не будет: надо всегда думать головой, и если конструктор долгий, а многопоточный код под нагрузкой — лучше прогреть вызовом в начале программы.</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/x86asm.min.js"></script>
+<script>
+  document.querySelectorAll('pre code[class^="language-"]').forEach(function(el) {
+    hljs.highlightElement(el);
+  });
+</script>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById('themeToggle');
+    var saved = localStorage.getItem('theme');
+    if (saved === 'light' || saved === 'dark') root.setAttribute('data-theme', saved);
+    function currentTheme() {
+      var attr = root.getAttribute('data-theme');
+      if (attr) return attr;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function render() {
+      btn.textContent = currentTheme() === 'dark' ? '☀ светлая' : '☾ тёмная';
+    }
+    btn.addEventListener('click', function () {
+      var next = currentTheme() === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      render();
+    });
+    render();
+  })();
+</script>
+</body>
+</html>
